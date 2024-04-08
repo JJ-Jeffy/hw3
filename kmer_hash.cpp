@@ -73,7 +73,10 @@ int main(int argc, char** argv) {
     std::vector<kmer_pair> start_nodes;
 
     for (auto& kmer : kmers) {
+        upcxx::barrier();
         bool success = hashmap.insert(kmer);
+        upcxx::barrier();
+        
         if (!success) {
             throw std::runtime_error("Error: HashMap is full!");
         }
