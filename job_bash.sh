@@ -1,4 +1,5 @@
 #!/bin/bash
+rm -r build
 module load contrib upcxx/2023.9.0
 mkdir build
 cd build

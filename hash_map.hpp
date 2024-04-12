@@ -6,11 +6,11 @@
 struct HashMap {
     
     // initialize the atomic domain for the hashmap
-    upcxx::atomic_domain<int> atomicDomain; 
+    upcxx::atomic_domain<int> ad = upcxx::atomic_domain<int>({upcxx::atomic_op::fetch_add,upcxx::atomic_op::load});
 
-    // initialize the global pointers for the data and used arrays
-    upcxx::global_ptr<kmer_pair>* data_ptr;
-    upcxx::global_ptr<uint64_t>* used_ptr;
+    // initialize the distributed objects with global pointers 
+    upcxx::dist_object<upcxx::global_ptr<kmer_pair>>* data_ptr;
+    upcxx::dist_object<upcxx::global_ptr<int>>* used_ptr;
 
     // initialize the size of the hashmap and the number of processors
     size_t my_size;
@@ -19,6 +19,10 @@ struct HashMap {
 
     HashMap(size_t size);
 
+    ~HashMap(){
+        ad.destroy();
+    }
+
     // Most important functions: insert and retrieve
     // k-mers from the hash table.
     bool insert(const kmer_pair& kmer);
@@ -26,41 +30,78 @@ struct HashMap {
 
     // Helper functions
 
-    // Write and read to a logical data slot in the table.
-    void write_slot(uint64_t slot, const kmer_pair& kmer);
-    kmer_pair read_slot(uint64_t slot);
+    // // Write and read to a logical data slot in the table.
+    // void write_slot(uint64_t slot, const kmer_pair& kmer);
+    // kmer_pair read_slot(uint64_t slot);
 
-    // Request a slot or check if it's already used.
-    upcxx::future<int> request_slot(uint64_t slot);
-    bool slot_used(uint64_t slot);
+    // // Request a slot or check if it's already used.
+    // upcxx::future<int> request_slot(uint64_t slot);
+    // bool slot_used(uint64_t slot);
 };
 
 HashMap::HashMap(size_t size) {
     my_size = size;
-    size_procs = upcxx::rank_n()+1; 
-    
-    // create the distributed object here for data and used 
-    upcxx::dist_object<upcxx::global_ptr<kmer_pair>> data(upcxx::new_array<kmer_pair>(size_procs));
-    upcxx::dist_object<upcxx::global_ptr<int>> used(upcxx::new_array<int>(size_procs));
+    size_procs = upcxx::rank_n() + 1;
 
-    // initialize the atomic domain for the hashmap
-    upcxx::atomic_domain<int> ad = upcxx::atomic_domain<int>({upcxx::atomic_op::load, upcxx::atomic_op::fetch_add});
+    // initialize the distributed objects with size_procs
+    upcxx::dist_object<upcxx::global_ptr<kmer_pair>>data(upcxx::new_array<kmer_pair>(size_procs));
+    upcxx::dist_object<upcxx::global_ptr<int>>used(upcxx::new_array<int>(size_procs));
 
-    // initialize the global pointers for the data and used arrays
-    data_ptr = data;
-    used_ptr = used;
-}   
+    data_ptr = &data;
+    used_ptr = &used;
+
+    // initialize the data and used pointers
+    upcxx::barrier(); 
+    for (size_t i = 0; i < size_procs; i++) {
+        data_ptr[i] = data.fetch(i).wait(); 
+        used_ptr[i] = used.fetch(i).wait();
+    }   
+    upcxx::barrier();
+}
+
+
 
 bool HashMap::insert(const kmer_pair& kmer) {
-    uint64_t hash = kmer.kmer.hash();
-    uint64_t probe = 0;
+    uint64_t hash = kmer.hash();
     bool success = false;
-    while (!success && probe < size()) {
-        uint64_t slot = (hash + probe++) % size();
-        probe += 1;
-        success = request_slot(slot).wait()>0 ? true : false;
-        if (success) {
-            write_slot(slot, kmer);
+    uint64_t curr_slot = hash % size();
+
+    // index of the processor that has the current slot 
+    uint64_t curr_proc = curr_slot / size_procs; 
+
+    // loop through curr_proc and check if the slot is available. If not, then increment using the atomic domain
+    for (int i = 0; i <= upcxx::rank_n(); i++){
+
+        // update the current processor based on where we are in the loop
+        // this will remain the same if we are on the first iteration
+        // and will change as we move on
+        curr_proc = (curr_proc + i) % upcxx::rank_n(); 
+
+
+        // what is the used value of the current slot
+        upcxx::global_ptr<int> used_curr_proc = used_ptr->fetch(curr_proc).wait();
+
+        // figure out where we will start looking for the empty slots 
+        uint64_t start_loc; 
+        if (curr_proc == upcxx::rank_me()){
+            start_loc = curr_slot % size(); 
+        } else {
+            start_loc = 0; 
+        }
+
+        // we know where the empty slots start, use while loop to find the first empty slot
+        int probe = 0; 
+        while ((probe + start_loc) < size_procs){
+
+            // check if the slot is used
+            int status = ad.fetch_add(used_curr_proc + (probe + start_loc), 1, std::memory_order_relaxed).wait();
+
+            // if the slot is not used, then we can write the data
+            if (status == 0){
+                upcxx::global_ptr<kmer_pair> data_curr_proc = data_ptr->fetch(curr_proc).wait();
+                upcxx::rput(kmer, data_curr_proc + (probe + start_loc)).wait();
+                break;
+            }
         }
     }
     return success;
@@ -68,52 +109,42 @@ bool HashMap::insert(const kmer_pair& kmer) {
 
 bool HashMap::find(const pkmer_t& key_kmer, kmer_pair& val_kmer) {
     uint64_t hash = key_kmer.hash();
-    uint64_t probe = 0;
     bool success = false;
-    while(!success && probe < size()) {
-        uint64_t slot = (hash + probe++) % size();
-        probe += 1;
-        
-        val_kmer = read_slot(slot);
-        if (val_kmer.kmer == key_kmer) {
-            success = true;
+    uint64_t curr_slot = hash % size();
+
+    // index of the processor that has the current slot
+    uint64_t curr_proc = curr_slot / size_procs;
+
+    // this code is similar to the insert function, but we are looking for the key
+    for (int i = 0; i <= upcxx::rank_n(); i++){
+
+        curr_proc = (curr_proc + i) % upcxx::rank_n(); 
+        upcxx::global_ptr<int> used_curr_proc = used_ptr->fetch(curr_proc).wait();
+        uint64_t start_loc; 
+        if (curr_proc == upcxx::rank_me()){
+            start_loc = curr_slot % size(); 
+        } else {
+            start_loc = 0; 
+        }
+
+        int probe = 0; 
+        while ((probe + start_loc) < size_procs){
+
+            // check if the slot is used
+            int status = ad.load(used_curr_proc + (probe + start_loc), std::memory_order_relaxed).wait();
+
+            // if the slot is not used, then we can write the data
+            if (status == 1){
+                upcxx::global_ptr<kmer_pair> data_curr_proc = data_ptr->fetch(curr_proc).wait();
+                val_kmer = upcxx::rget(data_curr_proc + (probe + start_loc)).wait();
+                success = true;
+                break;
+            }
         }
     }
+
+    return success;
 }
 
-bool HashMap::slot_used(uint64_t slot) { 
-    uint64_t curr = slot/size_procs;
-    uint64_t offset = slot%size_procs;
-    upcxx::global_ptr<uint64_t> used_ptr = used[curr] + offset;
-    return ad.load(used_ptr).wait()>0 ? true : false;
-}
-
-void HashMap::write_slot(uint64_t slot, const kmer_pair& kmer) { 
-    uint64_t curr = slot/size_procs;
-    uint64_t offset = slot%size_procs;
-    upcxx::global_ptr<kmer_pair> data_ptr = data[curr] + offset;
-    ad.store(data_ptr, kmer).wait();
-}
-
-kmer_pair HashMap::read_slot(uint64_t slot) { 
-    uint64_t curr = slot/size_procs;
-    uint64_t offset = slot%size_procs;
-    upcxx::global_ptr<kmer_pair> data_ptr = data[curr] + offset;
-    return ad.load(data_ptr).wait();
-}
-
-bool HashMap::request_slot(uint64_t slot) {
-    uint64_t curr = slot/size_procs;
-    uint64_t offset = slot%size_procs;
-    upcxx::global_ptr<uint64_t> used_ptr = used[curr] + offset;
-    return ad.fetch_add(used_ptr, 1).wait();
-}
 
 size_t HashMap::size() const noexcept { return my_size; }
-
-size_t HashMap::size_procs() const noexcept { return size_procs; }
-
-// destroy the hashmap atomic domain
-~HashMap() {
-    ad.destroy();
-}
