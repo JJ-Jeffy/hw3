@@ -19,10 +19,10 @@ int main(int argc, char** argv) {
 
     // TODO: Dear Students,
     // Please remove this if statement, when you start writing your parallel implementation.
-    if (upcxx::rank_n() > 1) {
-        throw std::runtime_error("Error: parallel implementation not started yet!"
-                                 " (remove this when you start working.)");
-    }
+    // if (upcxx::rank_n() > 1) {
+    //     throw std::runtime_error("Error: parallel implementation not started yet!"
+    //                              " (remove this when you start working.)");
+    // }
 
     if (argc < 2) {
         BUtil::print("usage: srun -N nodes -n ranks ./kmer_hash kmer_file [verbose|test [prefix]]\n");
@@ -74,10 +74,11 @@ int main(int argc, char** argv) {
 
     for (auto& kmer : kmers) {
         upcxx::barrier();
-        bool success = hashmap.insert(kmer);
+        upcxx::future<> success = hashmap.insert(kmer);
+        success.wait();
         upcxx::barrier();
         
-        if (!success) {
+        if (!success.is_ready()) {
             throw std::runtime_error("Error: HashMap is full!");
         }
 
@@ -102,8 +103,9 @@ int main(int argc, char** argv) {
         contig.push_back(start_kmer);
         while (contig.back().forwardExt() != 'F') {
             kmer_pair kmer;
-            bool success = hashmap.find(contig.back().next_kmer(), kmer);
-            if (!success) {
+            upcxx::future<std::string> success = hashmap.find(contig.back().next_kmer(), kmer);
+            success.wait();
+            if (!success.is_ready()) {
                 throw std::runtime_error("Error: k-mer not found in hashmap.");
             }
             contig.push_back(kmer);

@@ -1,0 +1,4 @@
+/global/homes/g/gbalteri/GROUP_HW3/hw3/build/CMakeFiles/kmer_hash_19.dir
+/global/homes/g/gbalteri/GROUP_HW3/hw3/build/CMakeFiles/kmer_hash_51.dir
+/global/homes/g/gbalteri/GROUP_HW3/hw3/build/CMakeFiles/edit_cache.dir
+/global/homes/g/gbalteri/GROUP_HW3/hw3/build/CMakeFiles/rebuild_cache.dir

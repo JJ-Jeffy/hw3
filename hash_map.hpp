@@ -2,8 +2,12 @@
 
 #include "kmer_t.hpp"
 #include <upcxx/upcxx.hpp>
+#include <map>
 
 struct HashMap {
+    using dobj_map_t = upcxx::dist_object<std::unordered_map<std::string,std::string>>;
+    dobj_map_t local_map;
+
     std::vector<kmer_pair> data;
     std::vector<int> used;
 
@@ -13,10 +17,20 @@ struct HashMap {
 
     HashMap(size_t size);
 
+    // map the key to a target process
+    int get_target_rank(const std::string &key) {
+    return std::hash<std::string>{}(key) % upcxx::rank_n();
+    }
+
+
+
     // Most important functions: insert and retrieve
     // k-mers from the hash table.
-    bool insert(const kmer_pair& kmer);
-    bool find(const pkmer_t& key_kmer, kmer_pair& val_kmer);
+    // bool insert(const kmer_pair& kmer);
+    // bool find(const pkmer_t& key_kmer, kmer_pair& val_kmer);
+    // upcxx::future<> insert(const kmer_pair& kmer, const std::string &val);
+    upcxx::future<> insert(const kmer_pair& kmer);
+    upcxx::future<std::string> find(const pkmer_t& key_kmer, kmer_pair& val_kmer);
 
     // Helper functions
 
@@ -48,17 +62,33 @@ HashMap::HashMap(size_t size) {
 //     } while (!success && probe < size());
 //     return success;
 // }
+
+
+// upcxx::future<> HashMap::insert(const kmer_pair& kmer, const std::string &val){
+//     // get key
+//     uint64_t hash = kmer.hash();
+//     std::string value = kmer.kmer_str();
+//     // return empty upcxx:: future by default
+//     return upcxx::rpc(get_target_rank(std::to_string(hash)), 
+//         // lambda to insert key-value pair
+//         [](dobj_map_t &lmap, const uint64_t &hash, const std::string &value) {
+//             // insert into the local map at the target
+//             lmap->insert({kmer, value});
+//         }, local_map, hash, value);
+
+
 upcxx::future<> HashMap::insert(const kmer_pair& kmer){
     // get key
     uint64_t hash = kmer.hash();
-    std::string value = kmer.get();
+    std::string value = kmer.kmer_str();
     // return empty upcxx:: future by default
-    return upcxx::rpc(get_target_rank(hash), 
+    return upcxx::rpc(get_target_rank(std::to_string(hash)), 
         // lambda to insert key-value pair
         [](dobj_map_t &lmap, const uint64_t &hash, const std::string &value) {
             // insert into the local map at the target
-            lmap->insert({hash, value});
+            lmap->insert({std::to_string(hash), value});
         }, local_map, hash, value);
+
 }
 
 
@@ -82,12 +112,12 @@ upcxx::future<> HashMap::insert(const kmer_pair& kmer){
 
 upcxx::future<std::string> HashMap::find(const pkmer_t& key_kmer, kmer_pair& val_kmer) {
     std::string key = key_kmer.get();
-    return upcxx:rpc(get_target_rank(key),
+    return upcxx::rpc(get_target_rank(key),
     // lambda to find the key
     [](dobj_map_t &lmap, const std::string &key) -> std::string {
         auto element = lmap->find(key);
-        if(element = lmap->end()) return std::string; // did not find it
-        else return elem->second; // key found and we return the value
+        if(element == lmap->end()) return std::string(); // did not find it
+        else return element->second; // key found and we return the value
     }, local_map, key);
 }
 
