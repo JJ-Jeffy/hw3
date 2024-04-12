@@ -17,7 +17,7 @@ struct HashMap {
     size_t size_procs;
     size_t size() const noexcept;
 
-    HashMap(size_t size, size_t hash_procs, upcxx::dist_object<upcxx::global_ptr<kmer_pair>> &data, upcxx::dist_object<upcxx::global_ptr<int>> &used);
+    HashMap(size_t size);
 
     ~HashMap(){
         ad.destroy();
@@ -29,11 +29,14 @@ struct HashMap {
     bool find(const pkmer_t& key_kmer, kmer_pair& val_kmer);
 };
 
-HashMap::HashMap(size_t size, size_t hash_procs, upcxx::dist_object<upcxx::global_ptr<kmer_pair>> &data, upcxx::dist_object<upcxx::global_ptr<int>> &used) {
+HashMap::HashMap(size_t size) {
+
     my_size = size;
-    size_procs = hash_procs;
-    data_ptr = &data;
-    used_ptr = &used;
+    size_procs = size / upcxx::rank_n() + 1; 
+
+    // Initialize the dist_object for the hashmap
+    data_ptr = new upcxx::dist_object<upcxx::global_ptr<kmer_pair>>(upcxx::new_array<kmer_pair>(size_procs));
+    used_ptr = new upcxx::dist_object<upcxx::global_ptr<int>>(upcxx::new_array<int>(size_procs));
 }
 
 
