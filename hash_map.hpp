@@ -9,15 +9,15 @@ struct HashMap {
     upcxx::atomic_domain<int> ad = upcxx::atomic_domain<int>({upcxx::atomic_op::fetch_add,upcxx::atomic_op::load});
 
     // initialize the distributed objects with global pointers 
-    upcxx::dist_object<upcxx::global_ptr<kmer_pair>>* data_ptr;
-    upcxx::dist_object<upcxx::global_ptr<int>>* used_ptr;
+    upcxx::dist_object<upcxx::global_ptr<kmer_pair>> *data_ptr;
+    upcxx::dist_object<upcxx::global_ptr<int>> *used_ptr;
 
     // initialize the size of the hashmap and the number of processors
     size_t my_size;
     size_t size_procs;
     size_t size() const noexcept;
 
-    HashMap(size_t size);
+    HashMap(size_t size, size_t hash_procs, upcxx::dist_object<upcxx::global_ptr<kmer_pair>> &data, upcxx::dist_object<upcxx::global_ptr<int>> &used);
 
     ~HashMap(){
         ad.destroy();
@@ -27,36 +27,13 @@ struct HashMap {
     // k-mers from the hash table.
     bool insert(const kmer_pair& kmer);
     bool find(const pkmer_t& key_kmer, kmer_pair& val_kmer);
-
-    // Helper functions
-
-    // // Write and read to a logical data slot in the table.
-    // void write_slot(uint64_t slot, const kmer_pair& kmer);
-    // kmer_pair read_slot(uint64_t slot);
-
-    // // Request a slot or check if it's already used.
-    // upcxx::future<int> request_slot(uint64_t slot);
-    // bool slot_used(uint64_t slot);
 };
 
-HashMap::HashMap(size_t size) {
+HashMap::HashMap(size_t size, size_t hash_procs, upcxx::dist_object<upcxx::global_ptr<kmer_pair>> &data, upcxx::dist_object<upcxx::global_ptr<int>> &used) {
     my_size = size;
-    size_procs = upcxx::rank_n() + 1;
-
-    // initialize the distributed objects with size_procs
-    upcxx::dist_object<upcxx::global_ptr<kmer_pair>>data(upcxx::new_array<kmer_pair>(size_procs));
-    upcxx::dist_object<upcxx::global_ptr<int>>used(upcxx::new_array<int>(size_procs));
-
+    size_procs = hash_procs;
     data_ptr = &data;
     used_ptr = &used;
-
-    // initialize the data and used pointers
-    upcxx::barrier(); 
-    for (size_t i = 0; i < size_procs; i++) {
-        data_ptr[i] = data.fetch(i).wait(); 
-        used_ptr[i] = used.fetch(i).wait();
-    }   
-    upcxx::barrier();
 }
 
 
@@ -83,8 +60,8 @@ bool HashMap::insert(const kmer_pair& kmer) {
 
         // figure out where we will start looking for the empty slots 
         uint64_t start_loc; 
-        if (curr_proc == upcxx::rank_me()){
-            start_loc = curr_slot % size(); 
+        if (i == 0){
+            start_loc = curr_slot % size_procs; 
         } else {
             start_loc = 0; 
         }
@@ -100,8 +77,11 @@ bool HashMap::insert(const kmer_pair& kmer) {
             if (status == 0){
                 upcxx::global_ptr<kmer_pair> data_curr_proc = data_ptr->fetch(curr_proc).wait();
                 upcxx::rput(kmer, data_curr_proc + (probe + start_loc)).wait();
-                break;
+                success = true;
+                return success;
             }
+
+            probe++;
         }
     }
     return success;
@@ -121,8 +101,8 @@ bool HashMap::find(const pkmer_t& key_kmer, kmer_pair& val_kmer) {
         curr_proc = (curr_proc + i) % upcxx::rank_n(); 
         upcxx::global_ptr<int> used_curr_proc = used_ptr->fetch(curr_proc).wait();
         uint64_t start_loc; 
-        if (curr_proc == upcxx::rank_me()){
-            start_loc = curr_slot % size(); 
+        if (i == 0){
+            start_loc = curr_slot % size_procs; 
         } else {
             start_loc = 0; 
         }
@@ -134,17 +114,20 @@ bool HashMap::find(const pkmer_t& key_kmer, kmer_pair& val_kmer) {
             int status = ad.load(used_curr_proc + (probe + start_loc), std::memory_order_relaxed).wait();
 
             // if the slot is not used, then we can write the data
-            if (status == 1){
+            if (status > 0){
                 upcxx::global_ptr<kmer_pair> data_curr_proc = data_ptr->fetch(curr_proc).wait();
                 val_kmer = upcxx::rget(data_curr_proc + (probe + start_loc)).wait();
-                success = true;
-                break;
+                
+                if (val_kmer.kmer == key_kmer){
+                    success = true;
+                    return success;
+                }
             }
+            probe++;
         }
     }
 
     return success;
 }
-
 
 size_t HashMap::size() const noexcept { return my_size; }
