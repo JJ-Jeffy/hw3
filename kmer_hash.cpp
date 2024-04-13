@@ -48,19 +48,7 @@ int main(int argc, char** argv) {
 
     // Load factor of 0.5
     size_t hash_table_size = n_kmers * (1.0 / 0.5);
-    size_t hash_procs = hash_table_size/upcxx::rank_n() + 1;
 
-    // Initialize the dist_object for the hashmap
-    // upcxx::dist_object<upcxx::global_ptr<kmer_pair>> data(upcxx::new_array<kmer_pair>(hash_procs));
-    // upcxx::dist_object<upcxx::global_ptr<int>> used(upcxx::new_array<int>(hash_procs));
-
-    // // intialize the used pointer of the local to 0 
-    // int *used_ptr = used->local();
-    // for (size_t i = 0; i < hash_procs; i++) {
-    //     used_ptr[i] = 0;
-    // }
-
-    // HashMap hashmap(hash_table_size, hash_procs, data, used);
     HashMap hashmap(hash_table_size);
 
     if (run_type == "verbose") {
